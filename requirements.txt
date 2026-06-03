@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────
+# AI Trading Agent - Full Requirements
+# ─────────────────────────────────────────
+
+# LLM - Groq (free tier, LLaMA 3)
+groq
+
+# Stock Market Data
+yfinance
+
+# News Data (free tier - 100 req/day)
+newsapi-python
+
+# Scheduler (local testing only)
+apscheduler
+
+# RAG - Vector Database
+chromadb
+
+# RAG - Embeddings (runs locally, free)
+sentence-transformers
+
+# Sentiment Analysis (runs locally, free)
+transformers
+torch
+
+# Database - Supabase
+supabase
+
+# Frontend Dashboard
+streamlit
+
+# Charts
+plotly
+
+# Data Handling
+pandas
+numpy
+
+# Environment Variables
+python-dotenv
+
+# HTTP Requests
+requests
