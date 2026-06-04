@@ -107,8 +107,6 @@ def get_watchlist_tickers() -> list:
     except Exception as e:
         print(f"[ERROR] get_watchlist_tickers failed: {e}")
         return ["AAPL", "TSLA", "MSFT"]  # Fallback
-    
-    
 
 
 def add_ticker_to_watchlist(ticker: str) -> bool:
@@ -260,7 +258,7 @@ def update_watchlist(ticker: str, status: str, reason: str, confidence: int) -> 
             "reason": reason,
             "confidence": confidence,
             "last_updated": datetime.now().isoformat()
-        }, on_conflict="ticker").execute()
+        }).execute()
     except Exception as e:
         print(f"[ERROR] update_watchlist failed: {e}")
 
@@ -318,3 +316,150 @@ def get_recent_decisions(limit: int = 50) -> list:
     except Exception as e:
         print(f"[ERROR] get_recent_decisions failed: {e}")
         return []
+
+
+# ─────────────────────────────────────────
+# STOCK CAPS TABLE
+# ─────────────────────────────────────────
+
+def get_stock_cap(ticker: str) -> float:
+    """
+    Get maximum investment cap for a specific stock.
+    Returns cap amount or default 2000.0 if not set.
+    """
+    try:
+        res = supabase.table("stock_caps") \
+            .select("max_investment") \
+            .eq("ticker", ticker) \
+            .eq("is_active", True) \
+            .execute()
+        if res.data:
+            return float(res.data[0]["max_investment"])
+        return 2000.0  # Default cap
+    except Exception as e:
+        print(f"[ERROR] get_stock_cap failed: {e}")
+        return 2000.0
+
+
+def set_stock_cap(ticker: str, max_investment: float) -> bool:
+    """
+    Set or update investment cap for a stock.
+    Called from Streamlit dashboard.
+    """
+    try:
+        supabase.table("stock_caps").upsert({
+            "ticker": ticker.upper(),
+            "max_investment": max_investment,
+            "is_active": True
+        }, on_conflict="ticker").execute()
+        return True
+    except Exception as e:
+        print(f"[ERROR] set_stock_cap failed: {e}")
+        return False
+
+
+def get_all_caps() -> list:
+    """
+    Fetch all stock caps for dashboard display.
+    """
+    try:
+        res = supabase.table("stock_caps") \
+            .select("*") \
+            .eq("is_active", True) \
+            .execute()
+        return res.data
+    except Exception as e:
+        print(f"[ERROR] get_all_caps failed: {e}")
+        return []
+
+
+# ─────────────────────────────────────────
+# ALERTS TABLE
+# ─────────────────────────────────────────
+
+def create_alert(alert_type: str, message: str,
+                 severity: str, ticker: str = None) -> None:
+    """
+    Create a new alert in the database.
+    Called by agent when critical conditions detected.
+    """
+    try:
+        supabase.table("alerts").insert({
+            "alert_type": alert_type,
+            "ticker": ticker,
+            "message": message,
+            "severity": severity,
+            "is_read": False,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        print(f"  🚨 ALERT created: [{severity}] {message}")
+    except Exception as e:
+        print(f"[ERROR] create_alert failed: {e}")
+
+
+def get_unread_alerts() -> list:
+    """
+    Fetch all unread alerts for dashboard display.
+    """
+    try:
+        res = supabase.table("alerts") \
+            .select("*") \
+            .eq("is_read", False) \
+            .order("created_at", desc=True) \
+            .execute()
+        return res.data
+    except Exception as e:
+        print(f"[ERROR] get_unread_alerts failed: {e}")
+        return []
+
+
+def mark_alert_read(alert_id: int) -> None:
+    """
+    Mark an alert as read when user acknowledges it.
+    """
+    try:
+        supabase.table("alerts") \
+            .update({"is_read": True}) \
+            .eq("id", alert_id) \
+            .execute()
+    except Exception as e:
+        print(f"[ERROR] mark_alert_read failed: {e}")
+
+
+# ─────────────────────────────────────────
+# USER SETTINGS TABLE
+# ─────────────────────────────────────────
+
+def get_user_settings() -> dict:
+    """
+    Fetch user settings (risk tolerance etc.)
+    """
+    try:
+        res = supabase.table("user_settings") \
+            .select("*") \
+            .order("id", desc=False) \
+            .limit(1) \
+            .execute()
+        if res.data:
+            return res.data[0]
+        return {"risk_tolerance": "conservative"}
+    except Exception as e:
+        print(f"[ERROR] get_user_settings failed: {e}")
+        return {"risk_tolerance": "conservative"}
+
+
+def update_user_settings(risk_tolerance: str,
+                         notification_email: str = None) -> bool:
+    """
+    Update user settings from dashboard.
+    """
+    try:
+        supabase.table("user_settings").update({
+            "risk_tolerance": risk_tolerance,
+            "notification_email": notification_email,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", 1).execute()
+        return True
+    except Exception as e:
+        print(f"[ERROR] update_user_settings failed: {e}")
+        return False

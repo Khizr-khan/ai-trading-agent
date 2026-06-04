@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────
 # main.py
 # Entry point — runs one full agent cycle
-# Called by GitHub Actions 4x daily
+# Now with investment caps and alert system
 # ─────────────────────────────────────────
 
 import os
@@ -11,7 +11,11 @@ from datetime import datetime
 from agent.data_fetcher import get_all_stock_data
 from agent.sentiment import load_model, analyze_news
 from agent.brain import analyze_stock
-from agent.decision_maker import execute_decision, calculate_portfolio_value
+from agent.decision_maker import (
+    execute_decision,
+    calculate_portfolio_value,
+    check_alert_conditions
+)
 from agent.memory import (
     get_portfolio,
     update_portfolio,
@@ -19,40 +23,42 @@ from agent.memory import (
     log_trade,
     log_agent_decision,
     update_watchlist,
-    get_watchlist_tickers
+    get_watchlist_tickers,
+    get_stock_cap,
+    create_alert
 )
 
 load_dotenv()
 
+STARTING_CASH = float(os.getenv("STARTING_CASH", 10000))
+
 
 def run_agent_cycle():
     """
-    One full agent cycle:
-    1. Load sentiment model
-    2. Fetch portfolio state from Supabase
-    3. Fetch watchlist from Supabase
-    4. Fetch all stock data
-    5. For each stock: analyze sentiment → get LLM decision → execute → log
-    6. Update portfolio value in Supabase
+    One full agent cycle with caps and alerts.
     """
     print(f"\n{'='*50}")
     print(f"Agent Cycle Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
 
-    # Step 1: Load sentiment model once
+    # Step 1: Load sentiment model
     load_model()
 
-    # Step 2: Fetch current portfolio state from Supabase
+    # Step 2: Fetch portfolio
     print("\nFetching portfolio...")
     portfolio = get_portfolio()
     print(f"  💰 Cash: ${portfolio['cash']:,.2f} | Holdings: {list(portfolio['holdings'].keys()) or 'None'}")
 
-    # Step 3: Fetch watchlist from Supabase (dynamic — includes user added stocks)
+    # Step 3: Fetch watchlist
     print("\nFetching watchlist...")
     watchlist = get_watchlist_tickers() or []
     print(f"  📋 Watching: {', '.join(watchlist)}")
 
-    # Step 4: Fetch all stock data (prices + news + history)
+    if not watchlist:
+        print("[ERROR] Watchlist is empty. Exiting.")
+        return
+
+    # Step 4: Fetch all stock data
     print("\nFetching market data...")
     all_stock_data = get_all_stock_data(watchlist)
 
@@ -60,7 +66,17 @@ def run_agent_cycle():
         print("[ERROR] No stock data fetched. Exiting cycle.")
         return
 
-    # Step 5: Loop through each stock and make decisions
+    # Step 5: Check portfolio-level alerts
+    total_value = portfolio.get("total_value", STARTING_CASH)
+    portfolio_loss_pct = ((total_value - STARTING_CASH) / STARTING_CASH) * 100
+    if portfolio_loss_pct <= -10:
+        create_alert(
+            alert_type="PORTFOLIO_DRAWDOWN",
+            message=f"Portfolio has lost {round(abs(portfolio_loss_pct), 2)}% of starting value — currently at ${total_value:,.2f}",
+            severity="CRITICAL"
+        )
+
+    # Step 6: Loop through each stock
     current_prices = {}
 
     for ticker, stock_data in all_stock_data.items():
@@ -70,7 +86,7 @@ def run_agent_cycle():
 
         current_prices[ticker] = stock_data["price"]
 
-        # Save price snapshot to database
+        # Save price snapshot
         save_price_snapshot(
             ticker=ticker,
             price=stock_data["price"],
@@ -78,14 +94,28 @@ def run_agent_cycle():
             volume=stock_data.get("volume", 0)
         )
 
-        # Analyze news sentiment
+        # Check alert conditions
+        stock_alerts = check_alert_conditions(ticker, stock_data, portfolio)
+        for alert in stock_alerts:
+            create_alert(
+                alert_type=alert["type"],
+                message=alert["message"],
+                severity=alert["severity"],
+                ticker=alert["ticker"]
+            )
+
+        # Get investment cap for this stock
+        stock_cap = get_stock_cap(ticker)
+        print(f"  💰 Investment cap: ${stock_cap:,.2f}")
+
+        # Analyze sentiment
         sentiment = analyze_news(stock_data.get("news", []))
-        print(f"  📰 Sentiment: {sentiment['overall']} ({round(sentiment['confidence']*100, 1)}% confidence)")
+        print(f"  📰 Sentiment: {sentiment['overall']} ({round(sentiment.get('confidence', 0)*100, 1)}% confidence)")
 
         # Get LLM decision
         decision = analyze_stock(stock_data, portfolio, sentiment)
 
-        # Log decision to database regardless of action
+        # Log decision
         log_agent_decision(
             ticker=ticker,
             action=decision["action"],
@@ -94,16 +124,22 @@ def run_agent_cycle():
             risk_level=decision["risk_level"]
         )
 
-        # Update good/bad watchlist
+        # Update watchlist
         if decision["action"] == "BUY":
             update_watchlist(ticker, "GOOD", decision["reasoning"], decision["confidence"])
         elif decision["action"] == "SELL":
             update_watchlist(ticker, "BAD", decision["reasoning"], decision["confidence"])
 
-        # Execute decision on portfolio
-        result = execute_decision(ticker, decision["action"], stock_data, portfolio)
+        # Execute decision with cap
+        result = execute_decision(
+            ticker=ticker,
+            action=decision["action"],
+            stock_data=stock_data,
+            portfolio=portfolio,
+            stock_cap=stock_cap
+        )
 
-        # If trade was executed, log it and update portfolio state
+        # Log trade if executed
         if result["executed"]:
             log_trade(
                 ticker=ticker,
@@ -114,10 +150,19 @@ def run_agent_cycle():
                 profit_loss=result.get("profit_loss"),
                 reasoning=decision["reasoning"]
             )
-            # Update portfolio for next iteration
+
+            # Alert if stop loss was forced
+            if result.get("forced"):
+                create_alert(
+                    alert_type="STOP_LOSS_TRIGGERED",
+                    message=f"Stop-loss triggered for {ticker}. Sold {result['shares']} shares at ${result['price']}. P&L: ${result.get('profit_loss', 0)}",
+                    severity="CRITICAL",
+                    ticker=ticker
+                )
+
             portfolio = result["portfolio"]
 
-    # Step 6: Recalculate and save total portfolio value
+    # Step 7: Update portfolio value
     portfolio["total_value"] = calculate_portfolio_value(portfolio, current_prices)
     update_portfolio(portfolio, current_prices)
 
